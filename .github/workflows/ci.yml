@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: "Unit tests · Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Set up Python ${{ matrix.python-version }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Syntax check scripts/audit.py
+        run: |
+          python -c "import ast; ast.parse(open('scripts/audit.py', encoding='utf-8').read()); print('audit.py syntax OK')"
+
+      - name: pytest with coverage (threshold 85%)
+        run: |
+          pytest tests/ -v \
+            --cov=scripts \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=85
+
+      - name: CLI smoke test (diagnose / capabilities / validate)
+        run: |
+          python scripts/audit.py diagnose examples/sample-prompt.txt --json > /tmp/diag.json
+          python -c "
+          import json
+          d = json.load(open('/tmp/diag.json'))
+          assert set(d) == {'score','dimensions','findings','meta'}
+          assert set(d['dimensions']) == {'altitude','depth','range'}
+          assert d['dimensions']['range'] is None
+          assert any(f['id']=='roleplay' for f in d['findings'])
+          print(f\"diagnose OK: score={d['score']}, {len(d['findings'])} findings\")
+          "
+          python scripts/audit.py capabilities --json > /tmp/caps.json
+          python -c "
+          import json
+          d = json.load(open('/tmp/caps.json'))
+          ids = {x['id'] for x in d['detectors']}
+          assert {'roleplay','task_verb','no_verification'} <= ids
+          print(f\"capabilities OK: {len(ids)} detectors\")
+          "
+          python scripts/audit.py validate --file examples/sample-prompt.txt --min-score 90 && exit 1 || test $? -eq 1
+          echo "validate OK: weak prompt correctly rejected at min-score 90"
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: ignore
